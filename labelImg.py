@@ -1,13 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import argparse
+import random
 import codecs
 import os.path
 import platform
+import datetime
 import shutil
 import sys
+import numpy as np
+import cv2
+from ultralytics import YOLO
 import webbrowser as wb
 from functools import partial
+import albumentations as A
+from albumentations.pytorch.transforms import ToTensorV2
 
 try:
     from PyQt5.QtGui import *
@@ -48,8 +55,22 @@ from libs.create_ml_io import JSON_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
 
+model = YOLO("design-1-17.pt")
+
 __appname__ = 'labelImg'
 
+class ProgressDialog(QDialog):
+    def __init__(self, title="progress", parent=None):
+        super(ProgressDialog, self).__init__(parent)
+        self.setWindowTitle(title)
+        
+        layout = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        layout.addWidget(self.progress_bar)
+        self.setLayout(layout)
+        
+    def set_progress(self, value):
+        self.progress_bar.setValue(value)
 
 class WindowMixin(object):
 
@@ -88,9 +109,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.string_bundle = StringBundle.get_bundle()
         get_str = lambda str_id: self.string_bundle.get_string(str_id)
 
-        # Save as Pascal voc xml
+        # Save as yolo txt
         self.default_save_dir = default_save_dir
-        self.label_file_format = settings.get(SETTING_LABEL_FILE_FORMAT, LabelFileFormat.PASCAL_VOC)
+        self.label_file_format = settings.get(SETTING_LABEL_FILE_FORMAT, LabelFileFormat.YOLO)
 
         # For loading all image under a directory
         self.m_img_list = []
@@ -216,15 +237,24 @@ class MainWindow(QMainWindow, WindowMixin):
         action = partial(new_action, self)
         quit = action(get_str('quit'), self.close,
                       'Ctrl+Q', 'quit', get_str('quitApp'))
+        
+        generate_labels = action('Generate Labels', self.generate_labels,
+                                'Ctrl+g', 'open', 'generateLabels')
+        
+        augment = action('Augment', self.perform_augmentation,
+                                'Ctrl+m', 'open', 'augmentLabels')
 
-        open = action(get_str('openFile'), self.open_file,
-                      'Ctrl+O', 'open', get_str('openFileDetail'))
+        # open = action(get_str('openFile'), self.open_file,
+        #               'Ctrl+O', 'open', get_str('openFileDetail'))
 
         open_dir = action(get_str('openDir'), self.open_dir_dialog,
                           'Ctrl+u', 'open', get_str('openDir'))
 
-        change_save_dir = action(get_str('changeSaveDir'), self.change_save_dir_dialog,
-                                 'Ctrl+r', 'open', get_str('changeSavedAnnotationDir'))
+        # change_save_dir = action(get_str('changeSaveDir'), self.change_save_dir_dialog,
+        #                          'Ctrl+r', 'open', get_str('changeSavedAnnotationDir'))
+
+        export = action('Export Dataset', self.export_dataset,
+                          'Ctrl+e', 'expert', 'exportDataset')
 
         open_annotation = action(get_str('openAnnotation'), self.open_annotation_dialog,
                                  'Ctrl+Shift+O', 'open', get_str('openAnnotationDetail'))
@@ -380,8 +410,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.draw_squares_option.triggered.connect(self.toggle_draw_square)
 
         # Store actions for further handling.
-        self.actions = Struct(save=save, save_format=save_format, saveAs=save_as, open=open, close=close, resetAll=reset_all, deleteImg=delete_image,
-                              lineColor=color1, create=create, delete=delete, edit=edit, copy=copy,
+        self.actions = Struct(save=save, save_format=save_format, saveAs=save_as, close=close, resetAll=reset_all, deleteImg=delete_image,
+                              lineColor=color1, create=create, delete=delete, edit=edit, copy=copy,generateLabels = generate_labels,
+                              augmentLabels = augment, exportDataset = export,
                               createMode=create_mode, editMode=edit_mode, advancedMode=advanced_mode,
                               shapeLineColor=shape_line_color, shapeFillColor=shape_fill_color,
                               zoom=zoom, zoomIn=zoom_in, zoomOut=zoom_out, zoomOrg=zoom_org,
@@ -390,7 +421,7 @@ class MainWindow(QMainWindow, WindowMixin):
                               lightBrighten=light_brighten, lightDarken=light_darken, lightOrg=light_org,
                               lightActions=light_actions,
                               fileMenuActions=(
-                                  open, open_dir, save, save_as, close, reset_all, quit),
+                                     open_dir, save, save_as, close, reset_all, quit),
                               beginner=(), advanced=(),
                               editMenu=(edit, copy, delete,
                                         None, color1, self.draw_squares_option),
@@ -426,8 +457,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.display_label_option.setChecked(settings.get(SETTING_PAINT_LABEL, False))
         self.display_label_option.triggered.connect(self.toggle_paint_labels_option)
 
+        # add_actions(self.menus.file,
+        #             ( open_dir, change_save_dir, open_annotation,generate_labels, copy_prev_bounding, self.menus.recentFiles, save, save_format, save_as, close, reset_all, delete_image, quit))
         add_actions(self.menus.file,
-                    (open, open_dir, change_save_dir, open_annotation, copy_prev_bounding, self.menus.recentFiles, save, save_format, save_as, close, reset_all, delete_image, quit))
+                    ( open_dir, open_annotation,generate_labels, copy_prev_bounding, self.menus.recentFiles, save, save_as, close, reset_all, delete_image, quit))
         add_actions(self.menus.help, (help_default, show_info, show_shortcut))
         add_actions(self.menus.view, (
             self.auto_saving,
@@ -448,13 +481,22 @@ class MainWindow(QMainWindow, WindowMixin):
             action('&Move here', self.move_shape)))
 
         self.tools = self.toolbar('Tools')
+        # self.actions.beginner = (
+        #     open_dir,generate_labels, change_save_dir, open_next_image, open_prev_image, verify, save, save_format, None, create, copy, delete, None,
+        #     zoom_in, zoom, zoom_out, fit_window, fit_width, None,
+        #     light_brighten, light, light_darken, light_org)
         self.actions.beginner = (
-            open, open_dir, change_save_dir, open_next_image, open_prev_image, verify, save, save_format, None, create, copy, delete, None,
+            open_dir,generate_labels,augment,export, open_next_image, open_prev_image, verify, save, None, create, copy, delete, None,
             zoom_in, zoom, zoom_out, fit_window, fit_width, None,
             light_brighten, light, light_darken, light_org)
 
+        # self.actions.advanced = (
+        #     open_dir,generate_labels, change_save_dir, open_next_image, open_prev_image, save, save_format, None,
+        #     create_mode, edit_mode, None,
+        #     hide_all, show_all)
+        
         self.actions.advanced = (
-            open, open_dir, change_save_dir, open_next_image, open_prev_image, save, save_format, None,
+            open_dir,generate_labels,augment, export,open_next_image, open_prev_image, save, None,
             create_mode, edit_mode, None,
             hide_all, show_all)
 
@@ -539,6 +581,9 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.file_path and os.path.isdir(self.file_path):
             self.open_dir_dialog(dir_path=self.file_path, silent=True)
 
+    def update_progress_bar(self, value):
+        self.progress_bar.setValue(value)
+
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_Control:
             self.canvas.set_drawing_shape_to_square(False)
@@ -567,6 +612,287 @@ class MainWindow(QMainWindow, WindowMixin):
             self.actions.save_format.setIcon(new_icon("format_createml"))
             self.label_file_format = LabelFileFormat.CREATE_ML
             LabelFile.suffix = JSON_EXT
+
+    def generate_labels(self):
+        directory = QFileDialog.getExistingDirectory(self, 'Select Directory', self.default_save_dir)
+        directories = []
+        class_name = None
+        if directory:
+            for item in os.listdir(directory):
+                if item != '.DS_Store':
+                    item_path = os.path.join(directory, item) 
+                    if os.path.isdir(item_path):  
+                        directories.append(item_path)
+                    else:
+                        class_name = [directory]
+        
+            if len(directories) > 0 and class_name :  
+                self.show_error_popup("Folder is not structured correctly")
+                return
+
+            elif not directories and not class_name:  
+                self.show_error_popup("No files or directories found in the selected folder")
+                return
+            
+            elif class_name: 
+                self.gen_label(os.path.dirname(directory),class_name)
+
+            elif len(directories)>0:
+                self.gen_label(directory,directories)
+
+
+    def gen_label(self, root_dir, directory_paths):
+        progress_dialog = ProgressDialog(title="Generating labels",parent=self)
+        progress_dialog.show()
+        dataset_dir = os.path.join(root_dir, "generated")
+        os.makedirs(dataset_dir, exist_ok=True)
+        classes = []
+        total_images = sum(len(os.listdir(dir_path)) for dir_path in directory_paths)
+        processed_images = 0
+        for dir_path in directory_paths:
+            class_name = os.path.basename(dir_path)
+            classes.append(class_name)
+            images = [os.path.join(dir_path, image) for image in os.listdir(dir_path) if image!='.DS_Store']
+            
+            for image_path in images:
+                image = cv2.imread(image_path)
+                image_height, image_width, _ = image.shape
+
+                results = model.predict(image, verbose=False)
+                boxes = results[0].boxes.xyxy.tolist()
+
+                image_name = os.path.splitext(os.path.basename(image_path))[0]
+                labels_file_path = os.path.join(root_dir, "generated", f"{image_name}.txt")
+
+                shutil.copyfile(image_path, os.path.join(root_dir, "generated",os.path.basename(image_path)))
+
+                with open(labels_file_path, 'w') as labels_file:
+                    for box in boxes:
+                        x_center = (box[0] + box[2]) / 2 / image_width
+                        y_center = (box[1] + box[3]) / 2 / image_height
+                        width = (box[2] - box[0]) / image_width
+                        height = (box[3] - box[1]) / image_height
+             
+                        labels_file.write(f"{classes.index(class_name)} {x_center} {y_center} {width} {height}\n")
+
+                processed_images += 1
+                progress_percentage = (processed_images / total_images) * 100
+                progress_dialog.set_progress(int(progress_percentage))
+                QApplication.processEvents()
+        progress_dialog.close()
+        with open(os.path.join(root_dir, "generated", "classes.txt"), 'w') as class_file:
+            for class_name in classes:
+                class_file.write(f"{class_name}\n")
+
+        self.default_save_dir = dataset_dir
+        self.load_predefined_classes(os.path.join(dataset_dir,"classes.txt"))
+
+        
+
+    def show_error_popup(self, message):
+        error_popup = QMessageBox()
+        error_popup.setIcon(QMessageBox.Critical)
+        error_popup.setWindowTitle("Error")
+        error_popup.setText("Error")
+        error_popup.setInformativeText(message)
+        error_popup.exec_()
+
+    
+    def read_yolo_annotation(self,annotation_file):
+        with open(annotation_file, 'r') as f:
+            lines = f.readlines()
+        bounding_boxes = []
+        for line in lines:
+            class_id, x_center, y_center, width, height = map(float, line.split())
+            bounding_boxes.append((class_id, x_center, y_center, width, height))
+        return bounding_boxes
+
+
+    def write_yolo_annotation(self,annotation_file, bounding_boxes):
+        with open(annotation_file, 'w') as f:
+            for box in bounding_boxes:
+                f.write(' '.join(map(str, box)) + '\n')
+
+
+    def augment_image_and_boxes(self,image_path, annotation_path):
+        # Read image
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        bounding_boxes = self.read_yolo_annotation(annotation_path)
+
+        formatted = []
+        for box in bounding_boxes:
+            class_id, x_center, y_center, width, height = box
+            formatted.append((x_center, y_center, width, height, class_id))
+
+        # Define the augmentation steps
+        augmentation_steps = [
+            A.RandomBrightnessContrast(p=1),
+            A.RandomContrast(limit=0.2, p=1),
+            A.RandomGamma(gamma_limit=(80, 120), p=1),
+            A.Blur(blur_limit=(3, 7), p=1),
+        ]
+
+        # Apply each augmentation step sequentially
+        augmented_images = [image]
+        augmented_labels = [formatted]
+        for step in augmentation_steps:
+            augmented_images_new = []
+            augmented_labels_new = []
+            for img, lbl in zip(augmented_images, augmented_labels):
+                augmented = step(image=img, bboxes=lbl)
+                augmented_images_new.append(augmented['image'])
+                augmented_labels_new.append(augmented['bboxes'])
+            augmented_images.extend(augmented_images_new)
+            augmented_labels.extend(augmented_labels_new)
+
+        # Apply horizontal flipping
+        flipped_images = [cv2.flip(img, 1) for img in augmented_images]
+        flipped_labels = [[(1 - box[0], box[1], box[2], box[3], box[4]) for box in lbl] for lbl in augmented_labels]
+
+        # Combine original and flipped images and labels
+        all_images = augmented_images + flipped_images
+        all_labels = augmented_labels + flipped_labels
+
+        # Save the augmented images and annotations
+        for i, (augmented_image, augmented_label) in enumerate(zip(all_images, all_labels)):
+            augmented_boxes_yolo = []
+            for box in augmented_label:
+                x_center, y_center, width, height, class_id = box
+                augmented_boxes_yolo.append((int(class_id), x_center, y_center, width, height))
+
+            # Append identifier to create unique file names
+            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            augmented_image_path = os.path.splitext(image_path)[0] + f'_augmented_{i}_{timestamp}.jpg'
+            cv2.imwrite(augmented_image_path, cv2.cvtColor(augmented_image, cv2.COLOR_RGB2BGR))
+
+            augmented_annotation_path = os.path.splitext(annotation_path)[0] + f'_augmented_{i}_{timestamp}.txt'
+            self.write_yolo_annotation(augmented_annotation_path, augmented_boxes_yolo)
+
+
+
+    def perform_augmentation(self):
+        directory = QFileDialog.getExistingDirectory(self, 'Select Directory', self.default_save_dir)
+        progress_dialog = ProgressDialog(title="Augmenting", parent=self)
+        progress_dialog.show()
+        processed = 0
+        total_images = len(os.listdir(directory))
+        for filename in os.listdir(directory):
+            if filename.endswith('.jpg'):
+                image_path = os.path.join(directory, filename)
+                annotation_path = os.path.join(directory, os.path.splitext(filename)[0] + '.txt')
+                self.augment_image_and_boxes(image_path, annotation_path)
+            processed += 1
+            progress_percentage = (processed / total_images) * 100
+            progress_dialog.set_progress(int(progress_percentage))
+            QApplication.processEvents()
+        # Move dialog close outside the loop
+        progress_dialog.close()
+                
+
+    def read_class_names(self,file_path):
+        try:
+            with open(file_path, 'r') as file:
+                class_names = file.readlines()
+                class_names = [name.strip() for name in class_names]
+            return class_names
+        except FileNotFoundError:
+            print(f"Error: File '{file_path}' not found.")
+            return []
+
+    def export_dataset(self):
+        train_ratio = 0.8
+
+        directory = QFileDialog.getExistingDirectory(self, 'Select Directory', self.default_save_dir)
+        
+        class_file = os.path.join(directory, 'classes.txt')
+
+        if not os.path.exists(class_file):
+            self.show_error_popup("Please select the correct folder. The folder having classes.txt, images and label files")
+            return
+
+        class_names = self.read_class_names(class_file)
+
+        target_dataset_dir = os.path.join(os.path.dirname(directory), 'yolo_dataset')
+        images_folder = os.path.join(target_dataset_dir, 'images')
+        labels_folder = os.path.join(target_dataset_dir, 'labels')
+
+        os.makedirs(images_folder, exist_ok=True)
+        os.makedirs(labels_folder, exist_ok=True)
+
+        images_train_folder = os.path.join(images_folder, 'train')
+        images_val_folder = os.path.join(images_folder, 'val')
+        labels_train_folder = os.path.join(labels_folder, 'train')
+        labels_val_folder = os.path.join(labels_folder, 'val')
+
+        os.makedirs(images_train_folder, exist_ok=True)
+        os.makedirs(images_val_folder, exist_ok=True)
+        os.makedirs(labels_train_folder, exist_ok=True)
+        os.makedirs(labels_val_folder, exist_ok=True)
+
+        class_files = {}
+
+        for file in os.listdir(directory):
+            if file.endswith('.txt') and file != 'classes.txt':
+                label_file = os.path.join(directory, file)
+                with open(label_file, 'r') as f:
+                    class_name = f.readline().strip().split()[0]
+                if class_name not in class_files:
+                    class_files[class_name] = []
+                class_files[class_name].append(os.path.splitext(file)[0])
+
+        total_files = sum(len(files) for files in class_files.values())
+        processed_files = 0
+
+        progress_dialog = QProgressDialog("Exporting Dataset...", "Cancel", 0, total_files, self)
+        progress_dialog.setWindowTitle("Export Dataset")
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setAutoClose(True)
+
+        for class_name, files in class_files.items():
+            random.shuffle(files)
+            train_count = int(len(files) * train_ratio)
+            train_files = files[:train_count]
+            valid_files = files[train_count:]
+
+            for file in train_files:
+                image_file = os.path.join(directory, file + '.jpg')
+                label_file = os.path.join(directory, file + '.txt')
+                shutil.copy(image_file, os.path.join(images_train_folder, file + '.jpg'))
+                shutil.copy(label_file, os.path.join(labels_train_folder, file + '.txt'))
+                processed_files += 1
+                progress_dialog.setValue(processed_files)
+
+            for file in valid_files:
+                image_file = os.path.join(directory, file + '.jpg')
+                label_file = os.path.join(directory, file + '.txt')
+                shutil.copy(image_file, os.path.join(images_val_folder, file + '.jpg'))
+                shutil.copy(label_file, os.path.join(labels_val_folder, file + '.txt'))
+                processed_files += 1
+                progress_dialog.setValue(processed_files)
+
+        progress_dialog.setValue(total_files)
+        self.write_to_file(target_dataset_dir, class_names)
+
+    def generate_names_content(self,class_names):
+        content = "names:\n"
+        for idx, name in enumerate(class_names):
+            content += f"  {idx}: {name}\n"
+        return content
+
+    def write_to_file(self,dataset_dir,classes):
+        try:
+            with open(os.path.join(dataset_dir,'data.yaml'), 'w') as file:
+                file.write("path:\n\n")
+                file.write(f"train: images/train\n")
+                file.write(f"val: images/val\n\n")
+                file.write(self.generate_names_content(classes))
+        except Exception as e:
+            print(f"Error : {e}")
+
+
 
     def change_format(self):
         if self.label_file_format == LabelFileFormat.PASCAL_VOC:
@@ -1306,7 +1632,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if dir_path is not None and len(dir_path) > 1:
             self.default_save_dir = dir_path
 
-        self.show_bounding_box_from_annotation_file(self.file_path)
+        self.show_bounding_box_from_annotation_file(self.default_save_dir)
 
         self.statusBar().showMessage('%s . Annotation will be saved to %s' %
                                      ('Change saved folder', self.default_save_dir))
@@ -1358,6 +1684,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.last_open_dir = target_dir_path
         self.import_dir_images(target_dir_path)
         self.default_save_dir = target_dir_path
+        
         if self.file_path:
             self.show_bounding_box_from_annotation_file(file_path=self.file_path)
 
@@ -1450,19 +1777,19 @@ class MainWindow(QMainWindow, WindowMixin):
         if filename:
             self.load_file(filename)
 
-    def open_file(self, _value=False):
-        if not self.may_continue():
-            return
-        path = os.path.dirname(ustr(self.file_path)) if self.file_path else '.'
-        formats = ['*.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
-        filters = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % LabelFile.suffix])
-        filename,_ = QFileDialog.getOpenFileName(self, '%s - Choose Image or Label file' % __appname__, path, filters)
-        if filename:
-            if isinstance(filename, (tuple, list)):
-                filename = filename[0]
-            self.cur_img_idx = 0
-            self.img_count = 1
-            self.load_file(filename)
+    # def open_file(self, _value=False):
+    #     if not self.may_continue():
+    #         return
+    #     path = os.path.dirname(ustr(self.file_path)) if self.file_path else '.'
+    #     formats = ['*.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
+    #     filters = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % LabelFile.suffix])
+    #     filename,_ = QFileDialog.getOpenFileName(self, '%s - Choose Image or Label file' % __appname__, path, filters)
+    #     if filename:
+    #         if isinstance(filename, (tuple, list)):
+    #             filename = filename[0]
+    #         self.cur_img_idx = 0
+    #         self.img_count = 1
+    #         self.load_file(filename)
 
     def save_file(self, _value=False):
         if self.default_save_dir is not None and len(ustr(self.default_save_dir)):
