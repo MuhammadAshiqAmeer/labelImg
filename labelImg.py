@@ -714,7 +714,63 @@ class MainWindow(QMainWindow, WindowMixin):
                 f.write(' '.join(map(str, box)) + '\n')
 
 
-    def augment_image_and_boxes(self,image_path, annotation_path):
+    # def augment_image_and_boxes(self,image_path, annotation_path):
+    #     # Read image
+    #     image = cv2.imread(image_path)
+    #     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    #     bounding_boxes = self.read_yolo_annotation(annotation_path)
+
+    #     formatted = []
+    #     for box in bounding_boxes:
+    #         class_id, x_center, y_center, width, height = box
+    #         formatted.append((x_center, y_center, width, height, class_id))
+
+    #     # Define the augmentation steps
+    #     augmentation_steps = [
+    #         A.RandomBrightnessContrast(p=1),
+    #         A.RandomContrast(limit=0.2, p=1),
+    #         A.RandomGamma(gamma_limit=(80, 120), p=1),
+    #         A.Blur(blur_limit=(3, 7), p=1),
+    #     ]
+
+    #     # Apply each augmentation step sequentially
+    #     augmented_images = [image]
+    #     augmented_labels = [formatted]
+    #     for step in augmentation_steps:
+    #         augmented_images_new = []
+    #         augmented_labels_new = []
+    #         for img, lbl in zip(augmented_images, augmented_labels):
+    #             augmented = step(image=img, bboxes=lbl)
+    #             augmented_images_new.append(augmented['image'])
+    #             augmented_labels_new.append(augmented['bboxes'])
+    #         augmented_images.extend(augmented_images_new)
+    #         augmented_labels.extend(augmented_labels_new)
+
+    #     # Apply horizontal flipping
+    #     flipped_images = [cv2.flip(img, 1) for img in augmented_images]
+    #     flipped_labels = [[(1 - box[0], box[1], box[2], box[3], box[4]) for box in lbl] for lbl in augmented_labels]
+
+    #     # Combine original and flipped images and labels
+    #     all_images = augmented_images + flipped_images
+    #     all_labels = augmented_labels + flipped_labels
+
+    #     # Save the augmented images and annotations
+    #     for i, (augmented_image, augmented_label) in enumerate(zip(all_images, all_labels)):
+    #         augmented_boxes_yolo = []
+    #         for box in augmented_label:
+    #             x_center, y_center, width, height, class_id = box
+    #             augmented_boxes_yolo.append((int(class_id), x_center, y_center, width, height))
+
+    #         # Append identifier to create unique file names
+    #         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    #         augmented_image_path = os.path.splitext(image_path)[0] + f'_augmented_{i}_{timestamp}.jpg'
+    #         cv2.imwrite(augmented_image_path, cv2.cvtColor(augmented_image, cv2.COLOR_RGB2BGR))
+
+    #         augmented_annotation_path = os.path.splitext(annotation_path)[0] + f'_augmented_{i}_{timestamp}.txt'
+    #         self.write_yolo_annotation(augmented_annotation_path, augmented_boxes_yolo)
+
+    def augment_image_and_boxes(self, image_path, annotation_path):
         # Read image
         image = cv2.imread(image_path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -726,7 +782,7 @@ class MainWindow(QMainWindow, WindowMixin):
             class_id, x_center, y_center, width, height = box
             formatted.append((x_center, y_center, width, height, class_id))
 
-        # Define the augmentation steps
+        # Define all augmentation steps
         augmentation_steps = [
             A.RandomBrightnessContrast(p=1),
             A.RandomContrast(limit=0.2, p=1),
@@ -734,10 +790,15 @@ class MainWindow(QMainWindow, WindowMixin):
             A.Blur(blur_limit=(3, 7), p=1),
         ]
 
-        # Apply each augmentation step sequentially
+        # Randomly choose a subset of augmentation steps
+        num_augmentation_steps = random.randint(1, len(augmentation_steps))
+        chosen_augmentation_steps = random.sample(augmentation_steps, num_augmentation_steps)
+
         augmented_images = [image]
         augmented_labels = [formatted]
-        for step in augmentation_steps:
+
+        # Apply each chosen augmentation step sequentially
+        for step in chosen_augmentation_steps:
             augmented_images_new = []
             augmented_labels_new = []
             for img, lbl in zip(augmented_images, augmented_labels):
@@ -769,7 +830,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
             augmented_annotation_path = os.path.splitext(annotation_path)[0] + f'_augmented_{i}_{timestamp}.txt'
             self.write_yolo_annotation(augmented_annotation_path, augmented_boxes_yolo)
-
 
 
     def perform_augmentation(self):
